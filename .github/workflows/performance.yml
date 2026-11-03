@@ -1,0 +1,71 @@
+name: Performance Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Load profile'
+        type: choice
+        options: [smoke, load, stress]
+        default: smoke
+
+env:
+  JMETER_VERSION: '5.6.3'
+
+jobs:
+  performance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache JMeter
+        id: cache-jmeter
+        uses: actions/cache@v4
+        with:
+          path: ~/apache-jmeter-${{ env.JMETER_VERSION }}
+          key: jmeter-${{ env.JMETER_VERSION }}
+
+      - name: Install JMeter
+        if: steps.cache-jmeter.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz" \
+            | tar -xz -C ~
+
+      - name: Add JMeter to PATH
+        run: echo "$HOME/apache-jmeter-${JMETER_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Run performance test
+        run: ./run.sh "${{ github.event.inputs.profile || 'smoke' }}"
+
+      - name: Upload HTML dashboard
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: jmeter-report-${{ github.event.inputs.profile || 'smoke' }}
+          path: results/
+          retention-days: 14
+
+      - name: Add summary to the run
+        if: ${{ !cancelled() }}
+        run: |
+          PROFILE="${{ github.event.inputs.profile || 'smoke' }}"
+          STATS="results/${PROFILE}/html-report/statistics.json"
+          [ -f "$STATS" ] || exit 0
+          {
+            echo "## Performance results (${PROFILE})"
+            echo ""
+            echo "| Request | Samples | Error % | Avg (ms) | p95 (ms) | Throughput (req/s) |"
+            echo "|---|---:|---:|---:|---:|---:|"
+            jq -r 'to_entries[] | .value | "| \(.transaction) | \(.sampleCount) | \(.errorPct * 100 | round / 100) | \(.meanResTime | round) | \(.pct2ResTime | round) | \(.throughput * 100 | round / 100) |"' "$STATS"
+          } >> "$GITHUB_STEP_SUMMARY"
